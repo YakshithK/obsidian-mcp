@@ -4,32 +4,28 @@ import { CallToolRequestSchema, ListToolsRequestSchema } from "@modelcontextprot
 import { promises as fs } from "fs";
 import path from "path";
 
-// The vault path is pulled from your Claude Desktop Config
 const VAULT_PATH = process.env.OBSIDIAN_VAULT_PATH;
 
 if (!VAULT_PATH) {
-  console.error("Error: OBSIDIAN_VAULT_PATH environment variable is not set.");
+  console.error("Error: OBSIDIAN_VAULT_PATH is not set.");
   process.exit(1);
 }
 
 const server = new Server({
-  name: "obsidian-mcp-pro",
-  version: "1.2.0",
+  name: "obsidian-mcp-ultimate",
+  version: "1.3.0",
 }, {
   capabilities: { tools: {} },
 });
 
-/**
- * Helper: Recursively get all markdown files, ignoring hidden folders like .obsidian or .git
- */
+// --- Helpers ---
+
 async function getFiles(dir, fileList = []) {
   const files = await fs.readdir(dir, { withFileTypes: true });
   for (const file of files) {
     const filePath = path.join(dir, file.name);
     if (file.isDirectory()) {
-      if (!file.name.startsWith('.')) {
-        await getFiles(filePath, fileList);
-      }
+      if (!file.name.startsWith('.')) await getFiles(filePath, fileList);
     } else if (file.name.endsWith('.md')) {
       fileList.push(path.relative(VAULT_PATH, filePath));
     }
@@ -37,146 +33,148 @@ async function getFiles(dir, fileList = []) {
   return fileList;
 }
 
-/**
- * 1. Define the Toolset
- */
+// --- Tool Definitions ---
+
 server.setRequestHandler(ListToolsRequestSchema, async () => ({
   tools: [
+    { name: "list_notes", description: "List all notes recursively.", inputSchema: { type: "object", properties: {} } },
+    { name: "read_note", description: "Read a note's full content.", inputSchema: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] } },
+    { name: "search_notes", description: "Search for text in all notes.", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
+    { name: "create_note", description: "Create or overwrite a note.", inputSchema: { type: "object", properties: { relative_path: { type: "string" }, content: { type: "string" } }, required: ["relative_path", "content"] } },
+    { name: "append_note", description: "Append text to the end of a note.", inputSchema: { type: "object", properties: { relative_path: { type: "string" }, content: { type: "string" } }, required: ["relative_path", "content"] } },
     {
-      name: "list_notes",
-      description: "List all notes in the vault to see the file structure.",
-      inputSchema: { type: "object", properties: {} }
-    },
-    {
-      name: "read_note",
-      description: "Read the full content of a markdown note.",
-      inputSchema: {
-        type: "object",
-        properties: { 
-          relative_path: { type: "string", description: "Path relative to vault (e.g., 'Folder/Note.md')" } 
-        },
-        required: ["relative_path"]
-      }
-    },
-    {
-      name: "search_notes",
-      description: "Search for a text string inside all notes in the vault.",
-      inputSchema: {
-        type: "object",
-        properties: { 
-          query: { type: "string", description: "The text to search for" } 
-        },
-        required: ["query"]
-      }
-    },
-    {
-      name: "create_note",
-      description: "Create a new note or overwrite an existing one with new content.",
-      inputSchema: {
-        type: "object",
-        properties: {
-          relative_path: { type: "string", description: "Path including .md" },
-          content: { type: "string", description: "The full content of the note" }
-        },
-        required: ["relative_path", "content"]
-      }
-    },
-    {
-      name: "append_note",
-      description: "Add text to the end of an existing note without overwriting it.",
+      name: "patch_note",
+      description: "Find and replace a specific string within a note.",
       inputSchema: {
         type: "object",
         properties: {
           relative_path: { type: "string" },
-          content: { type: "string", description: "The text to add to the bottom" }
+          find: { type: "string", description: "The exact text to find" },
+          replace: { type: "string", description: "The text to replace it with" }
         },
-        required: ["relative_path", "content"]
+        required: ["relative_path", "find", "replace"]
       }
     },
     {
-      name: "get_backlinks",
-      description: "Find all notes that link to a specific note using [[wikilinks]].",
+      name: "delete_note",
+      description: "Permanently delete a note.",
+      inputSchema: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] }
+    },
+    {
+      name: "move_note",
+      description: "Rename or move a file/folder.",
       inputSchema: {
         type: "object",
         properties: {
-          note_name: { type: "string", description: "The name of the note without .md (e.g., 'Project Alpha')" }
+          old_path: { type: "string" },
+          new_path: { type: "string" }
         },
-        required: ["note_name"]
+        required: ["old_path", "new_path"]
       }
+    },
+    {
+      name: "create_directory",
+      description: "Create a new folder (recursive).",
+      inputSchema: { type: "object", properties: { directory_path: { type: "string" } }, required: ["directory_path"] }
+    },
+    {
+      name: "get_metadata",
+      description: "Extract YAML frontmatter properties from a note.",
+      inputSchema: { type: "object", properties: { relative_path: { type: "string" } }, required: ["relative_path"] }
+    },
+    {
+      name: "resolve_link",
+      description: "Convert an Obsidian [[wikilink]] into a relative file path.",
+      inputSchema: { type: "object", properties: { link_text: { type: "string", description: "The text inside the brackets" } }, required: ["link_text"] }
     }
   ]
 }));
 
-/**
- * 2. Tool Logic Execution
- */
+// --- Implementation ---
+
 server.setRequestHandler(CallToolRequestSchema, async (request) => {
   const { name, arguments: args } = request.params;
-
   try {
     switch (name) {
       case "list_notes": {
         const files = await getFiles(VAULT_PATH);
-        return { content: [{ type: "text", text: files.length > 0 ? files.join("\n") : "Vault is empty or path incorrect." }] };
+        return { content: [{ type: "text", text: files.join("\n") }] };
       }
 
       case "read_note": {
-        const fullPath = path.join(VAULT_PATH, args.relative_path);
-        const content = await fs.readFile(fullPath, "utf-8");
+        const content = await fs.readFile(path.join(VAULT_PATH, args.relative_path), "utf-8");
         return { content: [{ type: "text", text: content }] };
       }
 
+      case "patch_note": {
+        const fullPath = path.join(VAULT_PATH, args.relative_path);
+        const content = await fs.readFile(fullPath, "utf-8");
+        if (!content.includes(args.find)) throw new Error("Target text not found in note.");
+        const newContent = content.replace(args.find, args.replace);
+        await fs.writeFile(fullPath, newContent, "utf-8");
+        return { content: [{ type: "text", text: `Patched ${args.relative_path}` }] };
+      }
+
+      case "delete_note": {
+        await fs.unlink(path.join(VAULT_PATH, args.relative_path));
+        return { content: [{ type: "text", text: `Deleted ${args.relative_path}` }] };
+      }
+
+      case "move_note": {
+        const oldP = path.join(VAULT_PATH, args.old_path);
+        const newP = path.join(VAULT_PATH, args.new_path);
+        await fs.mkdir(path.dirname(newP), { recursive: true });
+        await fs.rename(oldP, newP);
+        return { content: [{ type: "text", text: `Moved to ${args.new_path}` }] };
+      }
+
+      case "create_directory": {
+        await fs.mkdir(path.join(VAULT_PATH, args.directory_path), { recursive: true });
+        return { content: [{ type: "text", text: `Created directory ${args.directory_path}` }] };
+      }
+
+      case "get_metadata": {
+        const content = await fs.readFile(path.join(VAULT_PATH, args.relative_path), "utf-8");
+        const match = content.match(/^---\s*\n([\s\S]*?)\n---\s*\n/);
+        return { content: [{ type: "text", text: match ? match[1] : "No YAML frontmatter found." }] };
+      }
+
+      case "resolve_link": {
+        // Handle aliases like [[Note|Alias]]
+        const cleanLink = args.link_text.split('|')[0].trim();
+        const files = await getFiles(VAULT_PATH);
+        // Find a file that matches the link name (case insensitive)
+        const match = files.find(f => f.toLowerCase().endsWith(`${cleanLink.toLowerCase()}.md`));
+        return { content: [{ type: "text", text: match || `Could not find file for [[${cleanLink}]]` }] };
+      }
+      
+      // ... search_notes, create_note, append_note logic from previous versions ...
       case "search_notes": {
         const files = await getFiles(VAULT_PATH);
         const results = [];
         for (const file of files) {
           const content = await fs.readFile(path.join(VAULT_PATH, file), "utf-8");
-          if (content.toLowerCase().includes(args.query.toLowerCase())) {
-            results.push(file);
-          }
+          if (content.toLowerCase().includes(args.query.toLowerCase())) results.push(file);
         }
-        return { content: [{ type: "text", text: results.length > 0 ? `Matches found in:\n${results.join("\n")}` : "No matches found." }] };
+        return { content: [{ type: "text", text: results.join("\n") || "No matches." }] };
       }
-
       case "create_note": {
-        const fullPath = path.join(VAULT_PATH, args.relative_path);
-        await fs.mkdir(path.dirname(fullPath), { recursive: true });
-        await fs.writeFile(fullPath, args.content, "utf-8");
-        return { content: [{ type: "text", text: `Successfully saved: ${args.relative_path}` }] };
+        const p = path.join(VAULT_PATH, args.relative_path);
+        await fs.mkdir(path.dirname(p), { recursive: true });
+        await fs.writeFile(p, args.content, "utf-8");
+        return { content: [{ type: "text", text: "Saved." }] };
       }
-
       case "append_note": {
-        const fullPath = path.join(VAULT_PATH, args.relative_path);
-        await fs.appendFile(fullPath, `\n${args.content}`, "utf-8");
-        return { content: [{ type: "text", text: `Successfully appended to: ${args.relative_path}` }] };
+        await fs.appendFile(path.join(VAULT_PATH, args.relative_path), `\n${args.content}`, "utf-8");
+        return { content: [{ type: "text", text: "Appended." }] };
       }
 
-      case "get_backlinks": {
-        const files = await getFiles(VAULT_PATH);
-        const linkPattern = `[[${args.note_name}]]`;
-        const results = [];
-        for (const file of files) {
-          const content = await fs.readFile(path.join(VAULT_PATH, file), "utf-8");
-          if (content.includes(linkPattern)) {
-            results.push(file);
-          }
-        }
-        return { content: [{ type: "text", text: results.length > 0 ? `Notes linking to "${args.note_name}":\n${results.join("\n")}` : `No backlinks found for "${args.note_name}".` }] };
-      }
-
-      default:
-        throw new Error(`Tool not found: ${name}`);
+      default: throw new Error("Unknown tool");
     }
-  } catch (error) {
-    return { 
-      content: [{ type: "text", text: `Error: ${error.message}` }], 
-      isError: true 
-    };
+  } catch (e) {
+    return { content: [{ type: "text", text: `Error: ${e.message}` }], isError: true };
   }
 });
 
-/**
- * 3. Start Server
- */
 const transport = new StdioServerTransport();
 await server.connect(transport);
