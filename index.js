@@ -13,7 +13,7 @@ if (!VAULT_PATH) {
 
 const server = new Server({
   name: "obsidian-mcp-ultimate",
-  version: "1.3.0",
+  version: "1.4.0",
 }, {
   capabilities: { tools: {} },
 });
@@ -42,6 +42,20 @@ server.setRequestHandler(ListToolsRequestSchema, async () => ({
     { name: "search_notes", description: "Search for text in all notes.", inputSchema: { type: "object", properties: { query: { type: "string" } }, required: ["query"] } },
     { name: "create_note", description: "Create or overwrite a note.", inputSchema: { type: "object", properties: { relative_path: { type: "string" }, content: { type: "string" } }, required: ["relative_path", "content"] } },
     { name: "append_note", description: "Append text to the end of a note.", inputSchema: { type: "object", properties: { relative_path: { type: "string" }, content: { type: "string" } }, required: ["relative_path", "content"] } },
+    {
+      name: "insert_content",
+      description: "Insert text at a specific line or after a specific anchor string (like a header).",
+      inputSchema: {
+        type: "object",
+        properties: {
+          relative_path: { type: "string" },
+          content_to_insert: { type: "string" },
+          line_number: { type: "number", description: "Line number (1-indexed)" },
+          after_text: { type: "string", description: "Text to find and insert directly after" }
+        },
+        required: ["relative_path", "content_to_insert"]
+      }
+    },
     {
       name: "patch_note",
       description: "Find and replace a specific string within a note.",
@@ -106,13 +120,33 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         return { content: [{ type: "text", text: content }] };
       }
 
+      case "insert_content": {
+        const fullPath = path.join(VAULT_PATH, args.relative_path);
+        const data = await fs.readFile(fullPath, "utf-8");
+        let lines = data.split(/\r?\n/);
+        let targetIndex = -1;
+
+        if (args.line_number) {
+          targetIndex = Math.max(0, Math.min(args.line_number - 1, lines.length));
+        } else if (args.after_text) {
+          const idx = lines.findIndex(line => line.includes(args.after_text));
+          if (idx !== -1) targetIndex = idx + 1;
+        }
+
+        if (targetIndex === -1) lines.push(args.content_to_insert);
+        else lines.splice(targetIndex, 0, args.content_to_insert);
+
+        await fs.writeFile(fullPath, lines.join("\n"), "utf-8");
+        return { content: [{ type: "text", text: `Successfully inserted content into ${args.relative_path}` }] };
+      }
+
       case "patch_note": {
         const fullPath = path.join(VAULT_PATH, args.relative_path);
         const content = await fs.readFile(fullPath, "utf-8");
         if (!content.includes(args.find)) throw new Error("Target text not found in note.");
         const newContent = content.replace(args.find, args.replace);
         await fs.writeFile(fullPath, newContent, "utf-8");
-        return { content: [{ type: "text", text: `Patched ${args.relative_path}` }] };
+        return { content: [{ type: "text", text: `Successfully patched ${args.relative_path}` }] };
       }
 
       case "delete_note": {
@@ -140,15 +174,12 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
       }
 
       case "resolve_link": {
-        // Handle aliases like [[Note|Alias]]
         const cleanLink = args.link_text.split('|')[0].trim();
         const files = await getFiles(VAULT_PATH);
-        // Find a file that matches the link name (case insensitive)
         const match = files.find(f => f.toLowerCase().endsWith(`${cleanLink.toLowerCase()}.md`));
         return { content: [{ type: "text", text: match || `Could not find file for [[${cleanLink}]]` }] };
       }
       
-      // ... search_notes, create_note, append_note logic from previous versions ...
       case "search_notes": {
         const files = await getFiles(VAULT_PATH);
         const results = [];
@@ -158,15 +189,17 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         }
         return { content: [{ type: "text", text: results.join("\n") || "No matches." }] };
       }
+
       case "create_note": {
         const p = path.join(VAULT_PATH, args.relative_path);
         await fs.mkdir(path.dirname(p), { recursive: true });
         await fs.writeFile(p, args.content, "utf-8");
-        return { content: [{ type: "text", text: "Saved." }] };
+        return { content: [{ type: "text", text: `Successfully created/updated ${args.relative_path}` }] };
       }
+
       case "append_note": {
         await fs.appendFile(path.join(VAULT_PATH, args.relative_path), `\n${args.content}`, "utf-8");
-        return { content: [{ type: "text", text: "Appended." }] };
+        return { content: [{ type: "text", text: `Appended to ${args.relative_path}` }] };
       }
 
       default: throw new Error("Unknown tool");
